@@ -27,6 +27,87 @@ except ImportError:
 
 st.set_page_config(page_title="Research Analysis Tool", page_icon="📊", layout="wide")
 
+# ---------------------------------------------------------------------------
+# "Classic desktop stats software" chrome — title bar / menu bar / toolbar.
+# Purely decorative (the menu/toolbar items aren't wired to actions); the
+# real navigation is the tab strip rendered further down.
+# ---------------------------------------------------------------------------
+
+st.markdown(
+    """
+    <style>
+    .spss-shell {
+        font-family: "Segoe UI", Arial, sans-serif;
+        border: 1px solid #94a3b8;
+        border-radius: 6px;
+        overflow: hidden;
+        margin-bottom: 0.75rem;
+    }
+    .spss-titlebar {
+        background: linear-gradient(180deg, #3b6ea5, #2c5686);
+        color: #ffffff;
+        padding: 7px 14px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 14px;
+    }
+    .spss-titlebar-text { flex: 1; font-weight: 500; }
+    .spss-titlebar-dots span {
+        display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+        background: rgba(255,255,255,0.55); margin-left: 5px;
+    }
+    .spss-menubar {
+        background: #eef2f7; border-bottom: 1px solid #cbd5e1;
+        padding: 5px 12px; display: flex; gap: 20px; font-size: 13px; color: #1e293b;
+    }
+    .spss-menubar span { cursor: default; padding: 2px 5px; border-radius: 3px; }
+    .spss-menubar span:hover { background: #dbe6f3; }
+    .spss-menubar span.active { background: #2c5686; color: #ffffff; }
+    .spss-toolbar {
+        background: #f8fafc; border-bottom: 1px solid #cbd5e1;
+        padding: 7px 12px; display: flex; gap: 12px; align-items: center; font-size: 16px;
+    }
+    .spss-toolbar-sep { width: 1px; height: 18px; background: #cbd5e1; }
+
+    /* Restyle the page-navigation radio (in the main area) as a classic tab strip */
+    div[data-testid="stRadio"] > div[role="radiogroup"] {
+        gap: 0; border-bottom: 2px solid #94a3b8; background: #eef2f7;
+    }
+    div[data-testid="stRadio"] label {
+        border: 1px solid #cbd5e1; border-bottom: none; border-radius: 6px 6px 0 0;
+        padding: 6px 16px; margin-right: 2px; background: #e2e8f0;
+    }
+    div[data-testid="stRadio"] label:has(input:checked) {
+        background: #ffffff; border-bottom: 2px solid #ffffff; margin-bottom: -2px;
+        font-weight: 600; color: #2c5686;
+    }
+    div[data-testid="stRadio"] input[type="radio"] { display: none; } /* hide the radio circle, tab-strip look */
+    </style>
+
+    <div class="spss-shell">
+        <div class="spss-titlebar">
+            <span>📊</span>
+            <span class="spss-titlebar-text">Research Analysis Tool — Data Editor</span>
+            <span class="spss-titlebar-dots"><span></span><span></span><span></span></span>
+        </div>
+        <div class="spss-menubar">
+            <span>File</span><span>Edit</span><span>View</span><span>Data</span>
+            <span>Transform</span><span class="active">Analyze</span><span>Graphs</span>
+            <span>Utilities</span><span>Extensions</span><span>Window</span><span>Help</span>
+        </div>
+        <div class="spss-toolbar">
+            <span title="Open">📂</span><span title="Save">💾</span><span title="Print">🖨️</span>
+            <span class="spss-toolbar-sep"></span>
+            <span title="Undo">↩️</span><span title="Redo">↪️</span>
+            <span class="spss-toolbar-sep"></span>
+            <span title="Find">🔍</span><span title="Insert Variable">➕</span><span title="Split File">🔀</span>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
 ID_PATTERN = re.compile(r"(?:^|_)id(?:_|$)")
 MAX_CATEGORICAL_LEVELS = 20
 ALPHA = 0.05
@@ -116,6 +197,16 @@ def cramers_v(table: pd.DataFrame, chi2: float) -> float:
     return float(np.sqrt(chi2 / denom))
 
 
+def variable_type_icon(df: pd.DataFrame, column: str) -> str:
+    """Small icon reflecting a variable's role, echoing SPSS's Measure-type icons
+    (a ruler for Scale, a tag for Nominal, an ID badge for identifiers)."""
+    if is_id_column(column):
+        return "🆔"
+    if pd.api.types.is_numeric_dtype(df[column]):
+        return "📏"
+    return "🏷️"
+
+
 def has_constant_column(clean: pd.DataFrame, cols) -> bool:
     return any(clean[c].nunique(dropna=True) <= 1 for c in cols)
 
@@ -190,8 +281,13 @@ def roc_curve_manual(y_true: pd.Series, y_score: pd.Series):
 st.session_state.setdefault("file_bytes", None)
 st.session_state.setdefault("variable_meta", {})  # {column_name: custom_label}
 
-st.title("📊 Research Analysis Tool")
-st.caption("SPSS-style research data analysis")
+page = st.radio(
+    "Go to",
+    ["📋 Data View", "⚙️ Variable View", "📊 Analyze"],
+    horizontal=True,
+    label_visibility="collapsed",
+    key="page_nav",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -204,10 +300,6 @@ with st.sidebar:
 
     if uploaded_file is not None:
         st.session_state.file_bytes = uploaded_file.getvalue()
-
-    st.divider()
-    st.header("🧭 Navigation")
-    page = st.radio("Go to", ["📋 Data View", "⚙️ Variable View", "📊 Analyze"])
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +350,11 @@ if page == "📋 Data View":
     col4.metric("Duplicate Rows", int(df.duplicated().sum()))
 
     st.divider()
-    st.dataframe(df, use_container_width=True, height=550)
+    column_config = {
+        col: st.column_config.Column(label=f"{variable_type_icon(df, col)} {col}")
+        for col in df.columns
+    }
+    st.dataframe(df, use_container_width=True, height=550, column_config=column_config)
 
     st.divider()
     st.subheader("🔎 Data Quality")
