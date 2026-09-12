@@ -1,29 +1,5 @@
-Research Analysis Tool
-An SPSS-style Streamlit app for exploring and analysing research data
-from Excel workbooks — no coding required.
-Features
-Data View — row/column counts, missing values, duplicates, per-variable data quality
-Variable View — auto-detects variable type and likely ID columns, editable labels
-Analyze
-Descriptive statistics (mean, SD, skewness, kurtosis, etc.)
-Frequencies with bar chart
-Group-wise descriptive statistics
-Independent-samples t-test (Welch's), with Levene's test and Cohen's d
-Paired-samples t-test, with Cohen's d
-Chi-square test, with Cramer's V and an automatic Fisher's exact
-fallback when expected cell counts are too small
-Correlation (Pearson / Spearman / Kendall)
-Every result table has a one-click CSV export
-Getting started
-Bash
-Then open the local URL Streamlit prints, and upload an .xlsx file
-from the sidebar.
-Notes
-Columns are treated as identifiers (excluded from analysis) if their
-name is or ends in id as a whole token (e.g. participant_id),
-so names like Grid or Paid are not mistakenly excluded.
-Variables with 20 or fewer distinct values are treated as categorical
-for grouping/chi-square purposes, regardless of whether they're
-stored as numbers or text.
-License
-MIT (or update to whatever you prefer).
+streamlit>=1.32,<2
+pandas>=2.0,<4
+numpy>=1.26,<3
+scipy>=1.11,<2
+openpyxl>=3.1,<4
