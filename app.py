@@ -19,6 +19,9 @@ uploaded_file = st.file_uploader(
 if uploaded_file:
 
     try:
+        # =========================
+        # READ EXCEL WORKBOOK
+        # =========================
         excel = pd.ExcelFile(uploaded_file)
         sheets = excel.sheet_names
 
@@ -40,12 +43,19 @@ if uploaded_file:
                 "Duplicate rows": int(data.duplicated().sum())
             })
 
+        # =========================
+        # WORKBOOK OVERVIEW
+        # =========================
         st.subheader("📁 Workbook Overview")
+
         st.dataframe(
             pd.DataFrame(overview),
             use_container_width=True
         )
 
+        # =========================
+        # SELECT SHEET
+        # =========================
         selected_sheet = st.selectbox(
             "Select sheet",
             sheets
@@ -56,12 +66,19 @@ if uploaded_file:
             sheet_name=selected_sheet
         )
 
+        # =========================
+        # DATA PREVIEW
+        # =========================
         st.subheader("📋 Data Preview")
+
         st.dataframe(
             df.head(100),
             use_container_width=True
         )
 
+        # =========================
+        # VARIABLE INFORMATION
+        # =========================
         st.subheader("🔎 Variable Information")
 
         info = pd.DataFrame({
@@ -82,45 +99,188 @@ if uploaded_file:
             use_container_width=True
         )
 
-        st.subheader("📈 Descriptive Statistics")
+        # =========================
+        # ANALYSIS
+        # =========================
+        st.header("📊 Statistical Analysis")
 
-        numeric = df.select_dtypes(
-            include=np.number
+        analysis_option = st.selectbox(
+            "Choose Analysis",
+            [
+                "Descriptive Statistics",
+                "Frequencies",
+                "Group-wise Descriptive Statistics"
+            ]
         )
 
-        if not numeric.empty:
+        # =========================
+        # DESCRIPTIVE STATISTICS
+        # =========================
+        if analysis_option == "Descriptive Statistics":
+
+            st.subheader("📈 Descriptive Statistics")
+
+            numeric = df.select_dtypes(
+                include=np.number
+            )
+
+            if not numeric.empty:
+
+                descriptive = pd.DataFrame({
+                    "N": numeric.count(),
+                    "Mean": numeric.mean(),
+                    "Median": numeric.median(),
+                    "SD": numeric.std(),
+                    "Minimum": numeric.min(),
+                    "Maximum": numeric.max(),
+                    "Range": numeric.max() - numeric.min(),
+                    "IQR": (
+                        numeric.quantile(0.75)
+                        - numeric.quantile(0.25)
+                    )
+                })
+
+                st.dataframe(
+                    descriptive.round(3),
+                    use_container_width=True
+                )
+
+            else:
+                st.info(
+                    "No numeric variables detected."
+                )
+
+        # =========================
+        # FREQUENCIES
+        # =========================
+        elif analysis_option == "Frequencies":
+
+            st.subheader("🔢 Frequencies & Percentages")
+
+            selected_variable = st.selectbox(
+                "Select variable",
+                df.columns
+            )
+
+            frequency = (
+                df[selected_variable]
+                .value_counts(dropna=False)
+                .reset_index()
+            )
+
+            frequency.columns = [
+                "Value",
+                "Frequency"
+            ]
+
+            frequency["Percentage"] = (
+                frequency["Frequency"]
+                / len(df)
+                * 100
+            ).round(2)
+
             st.dataframe(
-                numeric.describe().T,
+                frequency,
                 use_container_width=True
             )
-        else:
-            st.info("No numeric variables detected.")
 
+        # =========================
+        # GROUP-WISE DESCRIPTIVES
+        # =========================
+        elif analysis_option == "Group-wise Descriptive Statistics":
+
+            st.subheader(
+                "📊 Group-wise Descriptive Statistics"
+            )
+
+            numeric_columns = list(
+                df.select_dtypes(
+                    include=np.number
+                ).columns
+            )
+
+            if not numeric_columns:
+
+                st.info(
+                    "No numeric variables available."
+                )
+
+            else:
+
+                group_variable = st.selectbox(
+                    "Select grouping variable",
+                    df.columns
+                )
+
+                analysis_variable = st.selectbox(
+                    "Select numeric variable",
+                    numeric_columns
+                )
+
+                grouped = (
+                    df.groupby(group_variable)[
+                        analysis_variable
+                    ]
+                    .agg(
+                        N="count",
+                        Mean="mean",
+                        Median="median",
+                        SD="std",
+                        Minimum="min",
+                        Maximum="max"
+                    )
+                    .reset_index()
+                )
+
+                grouped["Range"] = (
+                    grouped["Maximum"]
+                    - grouped["Minimum"]
+                )
+
+                st.dataframe(
+                    grouped.round(3),
+                    use_container_width=True
+                )
+
+        # =========================
+        # DATA QUALITY
+        # =========================
         st.subheader("⚠️ Data Quality")
 
-        missing = int(df.isna().sum().sum())
-        duplicates = int(df.duplicated().sum())
+        missing = int(
+            df.isna().sum().sum()
+        )
+
+        duplicates = int(
+            df.duplicated().sum()
+        )
 
         if missing:
             st.warning(
                 f"{missing} missing cell(s) detected."
             )
         else:
-            st.success("No missing cells.")
+            st.success(
+                "No missing cells."
+            )
 
         if duplicates:
             st.warning(
                 f"{duplicates} duplicate row(s) detected."
             )
         else:
-            st.success("No duplicate rows.")
+            st.success(
+                "No duplicate rows."
+            )
 
     except Exception as error:
+
         st.error(
             f"Excel file could not be read: {error}"
         )
 
 else:
+
     st.info(
         "Upload an Excel .xlsx file to start."
-    )
+        )
