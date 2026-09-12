@@ -14,6 +14,13 @@ import pandas as pd
 import streamlit as st
 from scipy import stats
 
+try:
+    import statsmodels.api as sm
+    from statsmodels.stats.multicomp import pairwise_tukeyhsd
+    STATSMODELS_AVAILABLE = True
+except ImportError:
+    STATSMODELS_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -111,6 +118,69 @@ def cramers_v(table: pd.DataFrame, chi2: float) -> float:
 
 def has_constant_column(clean: pd.DataFrame, cols) -> bool:
     return any(clean[c].nunique(dropna=True) <= 1 for c in cols)
+
+
+def eta_squared_oneway(groups: list) -> float:
+    """Eta-squared effect size for a one-way ANOVA (SS_between / SS_total)."""
+    all_data = np.concatenate(groups)
+    grand_mean = all_data.mean()
+    ss_between = sum(len(g) * (g.mean() - grand_mean) ** 2 for g in groups)
+    ss_total = sum((all_data - grand_mean) ** 2)
+    if ss_total == 0:
+        return np.nan
+    return ss_between / ss_total
+
+
+def cronbachs_alpha(item_df: pd.DataFrame) -> float:
+    """Cronbach's alpha for a set of scale items (rows = respondents, columns = items)."""
+    item_df = item_df.dropna()
+    k = item_df.shape[1]
+    if k < 2 or len(item_df) < 2:
+        return np.nan
+    item_variances = item_df.var(ddof=1, axis=0)
+    total_variance = item_df.sum(axis=1).var(ddof=1)
+    if total_variance == 0:
+        return np.nan
+    return (k / (k - 1)) * (1 - item_variances.sum() / total_variance)
+
+
+def _trapezoid_area(y: np.ndarray, x: np.ndarray) -> float:
+    """Trapezoidal-rule integration, written by hand so it doesn't depend on
+    np.trapz (removed) vs np.trapezoid (its replacement) across numpy versions."""
+    y = np.asarray(y, dtype=float)
+    x = np.asarray(x, dtype=float)
+    return float(np.sum((x[1:] - x[:-1]) * (y[1:] + y[:-1]) / 2))
+
+
+def roc_curve_manual(y_true: pd.Series, y_score: pd.Series):
+    """ROC curve (FPR, TPR) and AUC computed from scratch (no scikit-learn
+    dependency needed). Sweeps every distinct predicted-probability threshold,
+    matching the standard step-function definition of the ROC curve."""
+    y_true = np.asarray(y_true)
+    y_score = np.asarray(y_score, dtype=float)
+
+    order = np.argsort(-y_score)
+    y_true_sorted = y_true[order]
+    y_score_sorted = y_score[order]
+
+    positives = y_true_sorted.sum()
+    negatives = len(y_true_sorted) - positives
+    if positives == 0 or negatives == 0:
+        return None, None, np.nan
+
+    tps = np.cumsum(y_true_sorted)
+    fps = np.cumsum(1 - y_true_sorted)
+
+    distinct_idx = np.where(np.diff(y_score_sorted))[0]
+    threshold_idx = np.r_[distinct_idx, len(y_true_sorted) - 1]
+
+    tpr = tps[threshold_idx] / positives
+    fpr = fps[threshold_idx] / negatives
+
+    fpr = np.r_[0, fpr]
+    tpr = np.r_[0, tpr]
+    auc = _trapezoid_area(tpr, fpr)
+    return fpr, tpr, auc
 
 
 # ---------------------------------------------------------------------------
@@ -264,10 +334,16 @@ elif page == "📊 Analyze":
             "Descriptive Statistics",
             "Frequencies",
             "Group-wise Descriptive Statistics",
+            "One-Sample t-test",
             "Independent t-test",
             "Paired t-test",
+            "One-Way ANOVA",
             "Chi-square test",
             "Correlation",
+            "Linear Regression",
+            "Logistic Regression",
+            "Nonparametric Tests",
+            "Reliability Analysis (Cronbach's Alpha)",
         ],
     )
 
@@ -337,6 +413,52 @@ elif page == "📊 Analyze":
 
                 st.dataframe(result, use_container_width=True)
                 download_button_for(result, "group-wise descriptives", "groupwise_descriptives.csv", "dl_group")
+
+    # --- One-Sample t-test ------------------------------------------
+    elif analysis == "One-Sample t-test":
+        st.subheader("🧪 One-Sample t-test")
+
+        if not numeric_columns:
+            st.warning("No numeric variable available.")
+        else:
+            variable = st.selectbox("Select numeric variable", numeric_columns, key="one_sample_var")
+            test_value = st.number_input(
+                "Test value (the population mean to compare against)", value=0.0, key="one_sample_val"
+            )
+
+            data = pd.to_numeric(df[variable], errors="coerce").dropna()
+
+            if len(data) < 2:
+                st.warning("At least two valid observations are required.")
+            else:
+                result = stats.ttest_1samp(data, test_value)
+                mean_diff = data.mean() - test_value
+                se = data.std(ddof=1) / np.sqrt(len(data))
+                ci_low, ci_high = stats.t.interval(1 - ALPHA, len(data) - 1, loc=mean_diff, scale=se)
+
+                summary = pd.DataFrame({
+                    "N": [len(data)], "Mean": [data.mean()], "SD": [data.std()],
+                    "Test Value": [test_value],
+                }).round(3)
+                st.subheader("Summary")
+                st.dataframe(summary, use_container_width=True)
+
+                test_result = pd.DataFrame({
+                    "Mean Difference": [mean_diff],
+                    "t-value": [result.statistic],
+                    "df": [len(data) - 1],
+                    "p-value": [result.pvalue],
+                    "95% CI Lower": [ci_low],
+                    "95% CI Upper": [ci_high],
+                }).round(4)
+                st.subheader("Test Result")
+                st.dataframe(test_result, use_container_width=True)
+                download_button_for(test_result, "one-sample t-test result", "one_sample_ttest.csv", "dl_one_sample")
+
+                if result.pvalue < ALPHA:
+                    st.success(f"Mean is statistically significantly different from {test_value} (p < {ALPHA}).")
+                else:
+                    st.info(f"No statistically significant difference from {test_value} (p ≥ {ALPHA}).")
 
     # --- Independent t-test ------------------------------------------
     elif analysis == "Independent t-test":
@@ -449,6 +571,85 @@ elif page == "📊 Analyze":
                 else:
                     st.info(f"No statistically significant difference (p ≥ {ALPHA}).")
 
+    # --- One-Way ANOVA --------------------------------------------------
+    elif analysis == "One-Way ANOVA":
+        st.subheader("📐 One-Way ANOVA")
+
+        if not numeric_columns:
+            st.warning("No numeric outcome variable available.")
+        else:
+            outcome = st.selectbox("Select numeric outcome", numeric_columns, key="anova_outcome")
+            candidates = [
+                c for c in categorical_candidates(df, exclude=[outcome])
+                if df[c].dropna().nunique() >= 3
+            ]
+
+            if not candidates:
+                st.warning(
+                    "No suitable grouping variable with 3 or more levels detected. "
+                    "(Use Independent t-test for a 2-group comparison.)"
+                )
+            else:
+                group_variable = st.selectbox("Select grouping variable", candidates, key="anova_group")
+
+                clean = df[[outcome, group_variable]].copy()
+                clean[outcome] = pd.to_numeric(clean[outcome], errors="coerce")
+                clean = clean.dropna()
+
+                groups_dict = {
+                    level: sub[outcome].to_numpy()
+                    for level, sub in clean.groupby(group_variable)
+                }
+                groups_dict = {k: v for k, v in groups_dict.items() if len(v) >= 2}
+
+                if len(groups_dict) < 3:
+                    st.warning("At least three groups with 2+ valid observations each are required.")
+                else:
+                    group_arrays = list(groups_dict.values())
+                    f_stat, p_value = stats.f_oneway(*group_arrays)
+                    eta_sq = eta_squared_oneway(group_arrays)
+
+                    summary = pd.DataFrame({
+                        "Group": list(groups_dict.keys()),
+                        "N": [len(v) for v in group_arrays],
+                        "Mean": [v.mean() for v in group_arrays],
+                        "SD": [v.std(ddof=1) for v in group_arrays],
+                    }).round(3)
+                    st.subheader("Group Summary")
+                    st.dataframe(summary, use_container_width=True)
+
+                    test_result = pd.DataFrame({
+                        "F-value": [f_stat], "p-value": [p_value], "Eta-squared": [eta_sq],
+                    }).round(4)
+                    st.subheader("ANOVA Result")
+                    st.dataframe(test_result, use_container_width=True)
+                    download_button_for(test_result, "ANOVA result", "anova.csv", "dl_anova")
+
+                    if p_value < ALPHA:
+                        st.success(f"Statistically significant difference between groups (p < {ALPHA}).")
+                        valid_mask = clean[group_variable].isin(groups_dict.keys())
+                        if STATSMODELS_AVAILABLE:
+                            tukey = pairwise_tukeyhsd(
+                                endog=clean.loc[valid_mask, outcome],
+                                groups=clean.loc[valid_mask, group_variable].astype(str),
+                                alpha=ALPHA,
+                            )
+                            tukey_table = tukey.summary()
+                            posthoc = pd.DataFrame(
+                                data=tukey_table.data[1:],
+                                columns=tukey_table.data[0],
+                            )
+                            st.subheader("Post-hoc: Tukey HSD")
+                            st.dataframe(posthoc, use_container_width=True)
+                            download_button_for(posthoc, "Tukey HSD post-hoc", "tukey_posthoc.csv", "dl_tukey")
+                        else:
+                            st.info(
+                                "Install the `statsmodels` package to also see pairwise "
+                                "Tukey HSD post-hoc comparisons here."
+                            )
+                    else:
+                        st.info(f"No statistically significant difference between groups (p ≥ {ALPHA}).")
+
     # --- Chi-square -------------------------------------------------
     elif analysis == "Chi-square test":
         st.subheader("🧮 Chi-square Test")
@@ -525,6 +726,340 @@ elif page == "📊 Analyze":
                 }).round(4)
                 st.dataframe(result, use_container_width=True)
                 download_button_for(result, "correlation result", "correlation.csv", "dl_corr")
+
+    # --- Linear Regression ----------------------------------------------
+    elif analysis == "Linear Regression":
+        st.subheader("📈 Linear Regression")
+
+        if not STATSMODELS_AVAILABLE:
+            st.error(
+                "This feature requires the `statsmodels` package. Install it "
+                "(it's already listed in requirements.txt) and restart the app."
+            )
+        elif len(numeric_columns) < 2:
+            st.warning("At least two numeric variables are required.")
+        else:
+            dependent = st.selectbox("Select dependent variable (outcome)", numeric_columns, key="lr_dep")
+            predictors = st.multiselect(
+                "Select independent variable(s) (predictors)",
+                [c for c in numeric_columns if c != dependent],
+                key="lr_pred",
+            )
+
+            if not predictors:
+                st.info("Select at least one predictor variable.")
+            else:
+                clean = df[[dependent] + predictors].apply(pd.to_numeric, errors="coerce").dropna()
+
+                if len(clean) < len(predictors) + 2:
+                    st.warning("Not enough complete observations for this many predictors.")
+                elif has_constant_column(clean, predictors):
+                    st.warning("One of the selected predictors has no variation (constant values).")
+                else:
+                    X = sm.add_constant(clean[predictors])
+                    y = clean[dependent]
+                    try:
+                        model = sm.OLS(y, X).fit()
+                    except Exception as error:
+                        st.error(f"Model could not be fit: {error}")
+                    else:
+                        model_summary = pd.DataFrame({
+                            "R-squared": [model.rsquared],
+                            "Adj. R-squared": [model.rsquared_adj],
+                            "F-statistic": [model.fvalue],
+                            "F p-value": [model.f_pvalue],
+                            "N": [int(model.nobs)],
+                        }).round(4)
+                        st.subheader("Model Summary")
+                        st.dataframe(model_summary, use_container_width=True)
+
+                        coef_table = pd.DataFrame({
+                            "Coefficient": model.params,
+                            "Std. Error": model.bse,
+                            "t-value": model.tvalues,
+                            "p-value": model.pvalues,
+                            "95% CI Lower": model.conf_int()[0],
+                            "95% CI Upper": model.conf_int()[1],
+                        }).round(4)
+                        coef_table.index.name = "Variable"
+                        coef_table = coef_table.reset_index()
+                        st.subheader("Coefficients")
+                        st.dataframe(coef_table, use_container_width=True)
+                        download_button_for(coef_table, "regression coefficients", "linear_regression.csv", "dl_linreg")
+
+                        equation_terms = " + ".join(
+                            f"{model.params[p]:.3f}×{p}" for p in predictors
+                        )
+                        st.caption(f"{dependent} = {equation_terms} + {model.params['const']:.3f}")
+
+    # --- Logistic Regression ---------------------------------------------
+    elif analysis == "Logistic Regression":
+        st.subheader("🎯 Logistic Regression")
+
+        if not STATSMODELS_AVAILABLE:
+            st.error(
+                "This feature requires the `statsmodels` package. Install it "
+                "(it's already listed in requirements.txt) and restart the app."
+            )
+        else:
+            binary_candidates = [c for c in categorical_candidates(df) if df[c].dropna().nunique() == 2]
+
+            if not binary_candidates or not numeric_columns:
+                st.warning("A binary outcome variable and at least one numeric predictor are required.")
+            else:
+                dependent = st.selectbox("Select binary outcome variable", binary_candidates, key="logit_dep")
+                predictors = st.multiselect(
+                    "Select independent variable(s) (predictors)",
+                    [c for c in numeric_columns if c != dependent],
+                    key="logit_pred",
+                )
+
+                if not predictors:
+                    st.info("Select at least one predictor variable.")
+                else:
+                    clean = df[[dependent] + predictors].dropna()
+                    for p in predictors:
+                        clean[p] = pd.to_numeric(clean[p], errors="coerce")
+                    clean = clean.dropna()
+
+                    levels = sorted(clean[dependent].unique(), key=str)
+                    positive_class = st.selectbox(
+                        "Outcome level to model as the 'positive' event (1)",
+                        levels, index=len(levels) - 1, key="logit_pos",
+                    )
+                    y = (clean[dependent] == positive_class).astype(int)
+
+                    if y.nunique() < 2:
+                        st.warning("Both outcome levels must be present after removing missing values.")
+                    elif len(clean) < len(predictors) + 10:
+                        st.warning("Not enough complete observations for a reliable model.")
+                    elif has_constant_column(clean, predictors):
+                        st.warning("One of the selected predictors has no variation (constant values).")
+                    else:
+                        X = sm.add_constant(clean[predictors])
+                        try:
+                            model = sm.Logit(y, X).fit(disp=0)
+                        except Exception as error:
+                            st.error(f"Model could not be fit (it may not have converged): {error}")
+                        else:
+                            coef_table = pd.DataFrame({
+                                "Coefficient (log-odds)": model.params,
+                                "Std. Error": model.bse,
+                                "z-value": model.tvalues,
+                                "p-value": model.pvalues,
+                                "Odds Ratio": np.exp(model.params),
+                            }).round(4)
+                            coef_table.index.name = "Variable"
+                            coef_table = coef_table.reset_index()
+                            st.subheader("Coefficients")
+                            st.dataframe(coef_table, use_container_width=True)
+                            download_button_for(
+                                coef_table, "logistic regression coefficients", "logistic_regression.csv", "dl_logreg"
+                            )
+                            st.caption(f"Pseudo R² (McFadden): {model.prsquared:.4f} | N = {int(model.nobs)}")
+
+                            predicted_prob = model.predict(X)
+                            predicted_class = (predicted_prob >= 0.5).astype(int)
+                            accuracy = (predicted_class == y).mean()
+                            st.caption(f"Classification accuracy at 0.5 threshold: {accuracy:.1%}")
+
+                            fpr, tpr, auc = roc_curve_manual(y, predicted_prob)
+                            if fpr is None:
+                                st.info("ROC curve is undefined here (only one outcome class present).")
+                            else:
+                                st.subheader("ROC Curve")
+                                roc_df = pd.DataFrame({"FPR": fpr, "TPR": tpr}).set_index("FPR")
+                                st.line_chart(roc_df)
+                                st.caption(f"AUC = {auc:.4f}")
+
+    # --- Nonparametric Tests ----------------------------------------------
+    elif analysis == "Nonparametric Tests":
+        st.subheader("📊 Nonparametric Tests")
+
+        test_type = st.selectbox(
+            "Select test",
+            ["Mann-Whitney U (2 independent groups)",
+             "Kruskal-Wallis (3+ independent groups)",
+             "Wilcoxon Signed-Rank (2 paired measurements)"],
+            key="nonparam_test",
+        )
+
+        if test_type == "Mann-Whitney U (2 independent groups)":
+            if not numeric_columns:
+                st.warning("No numeric outcome variable available.")
+            else:
+                outcome = st.selectbox("Select numeric outcome", numeric_columns, key="mw_outcome")
+                candidates = [
+                    c for c in categorical_candidates(df, exclude=[outcome])
+                    if df[c].dropna().nunique() == 2
+                ]
+                if not candidates:
+                    st.warning("No suitable two-group variable detected.")
+                else:
+                    group_variable = st.selectbox("Select grouping variable", candidates, key="mw_group")
+                    groups = df[group_variable].dropna().unique()
+                    group1, group2 = groups[0], groups[1]
+                    data1 = pd.to_numeric(df.loc[df[group_variable] == group1, outcome], errors="coerce").dropna()
+                    data2 = pd.to_numeric(df.loc[df[group_variable] == group2, outcome], errors="coerce").dropna()
+
+                    if len(data1) < 1 or len(data2) < 1:
+                        st.warning("Each group needs at least 1 valid observation.")
+                    else:
+                        result = stats.mannwhitneyu(data1, data2, alternative="two-sided")
+                        summary = pd.DataFrame({
+                            "Group": [str(group1), str(group2)],
+                            "N": [len(data1), len(data2)],
+                            "Median": [data1.median(), data2.median()],
+                        }).round(3)
+                        st.subheader("Group Summary")
+                        st.dataframe(summary, use_container_width=True)
+
+                        test_result = pd.DataFrame({
+                            "U-statistic": [result.statistic], "p-value": [result.pvalue],
+                        }).round(4)
+                        st.subheader("Test Result")
+                        st.dataframe(test_result, use_container_width=True)
+                        download_button_for(test_result, "Mann-Whitney U result", "mann_whitney.csv", "dl_mw")
+
+                        if result.pvalue < ALPHA:
+                            st.success(f"Statistically significant difference (p < {ALPHA}).")
+                        else:
+                            st.info(f"No statistically significant difference (p ≥ {ALPHA}).")
+
+        elif test_type == "Kruskal-Wallis (3+ independent groups)":
+            if not numeric_columns:
+                st.warning("No numeric outcome variable available.")
+            else:
+                outcome = st.selectbox("Select numeric outcome", numeric_columns, key="kw_outcome")
+                candidates = [
+                    c for c in categorical_candidates(df, exclude=[outcome])
+                    if df[c].dropna().nunique() >= 3
+                ]
+                if not candidates:
+                    st.warning("No suitable grouping variable with 3+ levels detected.")
+                else:
+                    group_variable = st.selectbox("Select grouping variable", candidates, key="kw_group")
+                    clean = df[[outcome, group_variable]].copy()
+                    clean[outcome] = pd.to_numeric(clean[outcome], errors="coerce")
+                    clean = clean.dropna()
+
+                    groups_dict = {
+                        level: sub[outcome].to_numpy()
+                        for level, sub in clean.groupby(group_variable)
+                    }
+                    groups_dict = {k: v for k, v in groups_dict.items() if len(v) >= 1}
+
+                    if len(groups_dict) < 3:
+                        st.warning("At least three groups with 1+ valid observation each are required.")
+                    else:
+                        group_arrays = list(groups_dict.values())
+                        result = stats.kruskal(*group_arrays)
+
+                        summary = pd.DataFrame({
+                            "Group": list(groups_dict.keys()),
+                            "N": [len(v) for v in group_arrays],
+                            "Median": [np.median(v) for v in group_arrays],
+                        }).round(3)
+                        st.subheader("Group Summary")
+                        st.dataframe(summary, use_container_width=True)
+
+                        test_result = pd.DataFrame({
+                            "H-statistic": [result.statistic], "p-value": [result.pvalue],
+                        }).round(4)
+                        st.subheader("Test Result")
+                        st.dataframe(test_result, use_container_width=True)
+                        download_button_for(test_result, "Kruskal-Wallis result", "kruskal_wallis.csv", "dl_kw")
+
+                        if result.pvalue < ALPHA:
+                            st.success(f"Statistically significant difference between groups (p < {ALPHA}).")
+                        else:
+                            st.info(f"No statistically significant difference between groups (p ≥ {ALPHA}).")
+
+        else:  # Wilcoxon Signed-Rank
+            if len(numeric_columns) < 2:
+                st.warning("At least two numeric variables are required.")
+            else:
+                before = st.selectbox("Select first measurement", numeric_columns, key="wsr_before")
+                after = st.selectbox(
+                    "Select second measurement", [c for c in numeric_columns if c != before], key="wsr_after"
+                )
+                paired = pd.DataFrame({
+                    "Before": pd.to_numeric(df[before], errors="coerce"),
+                    "After": pd.to_numeric(df[after], errors="coerce"),
+                }).dropna()
+                paired = paired[paired["Before"] != paired["After"]]  # ties are dropped by the test
+
+                if len(paired) < 1:
+                    st.warning("At least one non-tied paired observation is required.")
+                else:
+                    result = stats.wilcoxon(paired["Before"], paired["After"])
+                    test_result = pd.DataFrame({
+                        "N (non-tied pairs)": [len(paired)],
+                        "W-statistic": [result.statistic],
+                        "p-value": [result.pvalue],
+                    }).round(4)
+                    st.subheader("Test Result")
+                    st.dataframe(test_result, use_container_width=True)
+                    download_button_for(test_result, "Wilcoxon result", "wilcoxon.csv", "dl_wilcoxon")
+
+                    if result.pvalue < ALPHA:
+                        st.success(f"Statistically significant difference (p < {ALPHA}).")
+                    else:
+                        st.info(f"No statistically significant difference (p ≥ {ALPHA}).")
+
+    # --- Reliability Analysis ---------------------------------------------
+    elif analysis == "Reliability Analysis (Cronbach's Alpha)":
+        st.subheader("📏 Reliability Analysis")
+        st.caption("Measures internal consistency across a set of scale items (e.g. survey questions).")
+
+        if len(numeric_columns) < 2:
+            st.warning("At least two numeric items are required.")
+        else:
+            items = st.multiselect(
+                "Select scale items", numeric_columns, default=numeric_columns[: min(5, len(numeric_columns))],
+                key="rel_items",
+            )
+
+            if len(items) < 2:
+                st.info("Select at least two items.")
+            else:
+                item_df = df[items].apply(pd.to_numeric, errors="coerce")
+                complete_rows = item_df.dropna()
+
+                if len(complete_rows) < 2:
+                    st.warning("At least two complete respondent rows are required.")
+                else:
+                    alpha = cronbachs_alpha(complete_rows)
+
+                    st.metric("Cronbach's Alpha", f"{alpha:.3f}" if pd.notna(alpha) else "N/A")
+                    st.caption(f"Based on N = {len(complete_rows)} complete cases, {len(items)} items.")
+
+                    if pd.notna(alpha):
+                        if alpha >= 0.9:
+                            interpretation = "Excellent internal consistency."
+                        elif alpha >= 0.8:
+                            interpretation = "Good internal consistency."
+                        elif alpha >= 0.7:
+                            interpretation = "Acceptable internal consistency."
+                        elif alpha >= 0.6:
+                            interpretation = "Questionable internal consistency."
+                        else:
+                            interpretation = "Poor internal consistency — consider reviewing these items."
+                        st.info(interpretation)
+
+                    # item-total correlations, useful for spotting a weak/reversed item
+                    total_score = complete_rows.sum(axis=1)
+                    item_total_corr = {
+                        item: complete_rows[item].corr(total_score - complete_rows[item])
+                        for item in items
+                    }
+                    item_stats = pd.DataFrame({
+                        "Item": items,
+                        "Item-Total Correlation": [item_total_corr[i] for i in items],
+                    }).round(3)
+                    st.subheader("Item-Total Correlations")
+                    st.dataframe(item_stats, use_container_width=True)
+                    download_button_for(item_stats, "item-total correlations", "reliability_items.csv", "dl_reliability")
 
 
 # ---------------------------------------------------------------------------
